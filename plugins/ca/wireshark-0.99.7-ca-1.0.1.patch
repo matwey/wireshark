@@ -1,0 +1,106 @@
+diff -ur wireshark-0.99.7/configure.in wireshark-0.99.7-ca/configure.in
+--- wireshark-0.99.7/configure.in	2007-12-18 02:16:14.000000000 +0100
++++ wireshark-0.99.7-ca/configure.in	2007-12-21 00:19:12.000000000 +0100
+@@ -1609,6 +1609,7 @@
+   plugins/agentx/Makefile
+   plugins/artnet/Makefile
+   plugins/asn1/Makefile
++  plugins/ca/Makefile
+   plugins/ciscosm/Makefile
+   plugins/docsis/Makefile
+   plugins/enttec/Makefile
+diff -ur wireshark-0.99.7/Makefile.am wireshark-0.99.7-ca/Makefile.am
+--- wireshark-0.99.7/Makefile.am	2007-12-18 02:16:14.000000000 +0100
++++ wireshark-0.99.7-ca/Makefile.am	2007-12-21 00:37:39.000000000 +0100
+@@ -235,6 +235,7 @@
+ 	-dlopen plugins/agentx/agentx.la \
+ 	-dlopen plugins/artnet/artnet.la \
+ 	-dlopen plugins/asn1/asn1.la \
++	-dlopen plugins/ca/ca.la \
+ 	-dlopen plugins/ciscosm/ciscosm.la \
+ 	-dlopen plugins/docsis/docsis.la \
+ 	-dlopen plugins/enttec/enttec.la \
+Only in wireshark-0.99.7-ca/plugins: ca
+diff -ur wireshark-0.99.7/plugins/Makefile.am wireshark-0.99.7-ca/plugins/Makefile.am
+--- wireshark-0.99.7/plugins/Makefile.am	2007-12-18 02:14:52.000000000 +0100
++++ wireshark-0.99.7-ca/plugins/Makefile.am	2007-12-21 00:33:03.000000000 +0100
+@@ -25,6 +25,7 @@
+ 	agentx \
+ 	artnet \
+ 	asn1 \
++	ca \
+ 	ciscosm \
+ 	docsis \
+ 	enttec \
+diff -ur wireshark-0.99.7/plugins/Makefile.in wireshark-0.99.7-ca/plugins/Makefile.in
+--- wireshark-0.99.7/plugins/Makefile.in	2007-12-18 02:16:32.000000000 +0100
++++ wireshark-0.99.7-ca/plugins/Makefile.in	2007-12-21 00:47:07.000000000 +0100
+@@ -317,6 +317,7 @@
+ 	agentx \
+ 	artnet \
+ 	asn1 \
++	ca \
+ 	ciscosm \
+ 	docsis \
+ 	enttec \
+diff -ur wireshark-0.99.7/plugins/Makefile.nmake wireshark-0.99.7-ca/plugins/Makefile.nmake
+--- wireshark-0.99.7/plugins/Makefile.nmake	2007-12-18 02:14:52.000000000 +0100
++++ wireshark-0.99.7-ca/plugins/Makefile.nmake	2007-12-21 00:36:48.000000000 +0100
+@@ -10,6 +10,7 @@
+ 	agentx \
+ 	artnet \
+ 	asn1 \
++	ca \
+ 	ciscosm \
+ 	custom \
+ 	docsis \
+@@ -51,6 +52,11 @@
+ 	$(MAKE) /$(MAKEFLAGS) -f Makefile.nmake
+ 	cd ..
+ 
++ca:: 
++	cd ca
++	$(MAKE) /$(MAKEFLAGS) -f Makefile.nmake
++	cd ..
++
+ ciscosm:: 
+ 	cd ciscosm
+ 	$(MAKE) /$(MAKEFLAGS) -f Makefile.nmake
+@@ -182,6 +188,9 @@
+ 	cd asn1
+ 	$(MAKE) /$(MAKEFLAGS) -f Makefile.nmake clean
+ 	cd ..
++	cd ca
++	$(MAKE) /$(MAKEFLAGS) -f Makefile.nmake clean
++	cd ..
+ 	cd ciscosm
+ 	$(MAKE) /$(MAKEFLAGS) -f Makefile.nmake clean
+ 	cd ..
+@@ -265,6 +274,9 @@
+ 	cd asn1
+ 	$(MAKE) /$(MAKEFLAGS) -f Makefile.nmake distclean
+ 	cd ..
++	cd ca
++	$(MAKE) /$(MAKEFLAGS) -f Makefile.nmake distclean
++	cd ..
+ 	cd ciscosm
+ 	$(MAKE) /$(MAKEFLAGS) -f Makefile.nmake distclean
+ 	cd ..
+@@ -348,6 +360,9 @@
+ 	cd asn1
+ 	$(MAKE) /$(MAKEFLAGS) -f Makefile.nmake maintainer-clean
+ 	cd ..
++	cd ca
++	$(MAKE) /$(MAKEFLAGS) -f Makefile.nmake maintainer-clean
++	cd ..
+ 	cd ciscosm
+ 	$(MAKE) /$(MAKEFLAGS) -f Makefile.nmake maintainer-clean
+ 	cd ..
+@@ -428,6 +443,7 @@
+ 	xcopy agentx\*.dll $(VERSION) /d
+ 	xcopy artnet\*.dll $(VERSION) /d
+ 	xcopy asn1\*.dll $(VERSION) /d
++	xcopy ca\*.dll $(VERSION) /d
+ 	xcopy ciscosm\*.dll $(VERSION) /d
+ 	xcopy docsis\*.dll $(VERSION) /d
+ 	xcopy enttec\*.dll $(VERSION) /d

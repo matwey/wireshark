@@ -1,0 +1,74 @@
+diff -ru wireshark-1.10.2/configure.ac wireshark-ca-1.10.2/configure.ac
+--- wireshark-1.10.2/configure.ac	2013-09-10 18:56:31.000000000 +0200
++++ wireshark-ca-1.10.2/configure.ac	2013-10-23 20:12:34.106581397 +0200
+@@ -2680,6 +2680,7 @@
+   packaging/svr4/pkginfo
+   plugins/Makefile
+   plugins/asn1/Makefile
++  plugins/ca/Makefile
+   plugins/docsis/Makefile
+   plugins/ethercat/Makefile
+   plugins/gryphon/Makefile
+diff -ru wireshark-1.10.2/Makefile.am wireshark-ca-1.10.2/Makefile.am
+--- wireshark-1.10.2/Makefile.am	2013-10-23 20:05:59.000000000 +0200
++++ wireshark-ca-1.10.2/Makefile.am	2013-10-23 20:11:13.520842801 +0200
+@@ -291,6 +291,7 @@
+ -include plugins/Custom.make
+ plugin_ldadd = $(_CUSTOM_plugin_ldadd_) \
+ 	-dlopen plugins/asn1/asn1.la \
++	-dlopen plugins/ca/ca.la \
+ 	-dlopen plugins/docsis/docsis.la \
+ 	-dlopen plugins/ethercat/ethercat.la \
+ 	-dlopen plugins/gryphon/gryphon.la \
+diff -ru wireshark-1.10.2/Makefile.in wireshark-ca-1.10.2/Makefile.in
+--- wireshark-1.10.2/Makefile.in	2013-09-10 18:57:16.000000000 +0200
++++ wireshark-ca-1.10.2/Makefile.in	2013-10-23 20:11:13.524842887 +0200
+@@ -137,6 +137,7 @@
+ am_dftest_OBJECTS = dftest-dftest.$(OBJEXT)
+ dftest_OBJECTS = $(am_dftest_OBJECTS)
+ @HAVE_PLUGINS_TRUE@am__DEPENDENCIES_1 = plugins/asn1/asn1.la \
++@HAVE_PLUGINS_TRUE@	plugins/ca/ca.la \
+ @HAVE_PLUGINS_TRUE@	plugins/docsis/docsis.la \
+ @HAVE_PLUGINS_TRUE@	plugins/ethercat/ethercat.la \
+ @HAVE_PLUGINS_TRUE@	plugins/gryphon/gryphon.la \
+@@ -942,6 +943,7 @@
+ @HAVE_PLUGINS_FALSE@plugin_ldadd = 
+ @HAVE_PLUGINS_TRUE@plugin_ldadd = $(_CUSTOM_plugin_ldadd_) \
+ @HAVE_PLUGINS_TRUE@	-dlopen plugins/asn1/asn1.la \
++@HAVE_PLUGINS_TRUE@	-dlopen plugins/ca/ca.la \
+ @HAVE_PLUGINS_TRUE@	-dlopen plugins/docsis/docsis.la \
+ @HAVE_PLUGINS_TRUE@	-dlopen plugins/ethercat/ethercat.la \
+ @HAVE_PLUGINS_TRUE@	-dlopen plugins/gryphon/gryphon.la \
+diff -ru wireshark-1.10.2/plugins/Makefile.am wireshark-ca-1.10.2/plugins/Makefile.am
+--- wireshark-1.10.2/plugins/Makefile.am	2013-04-22 20:04:14.000000000 +0200
++++ wireshark-ca-1.10.2/plugins/Makefile.am	2013-10-23 20:11:17.808935667 +0200
+@@ -25,6 +25,7 @@
+ 
+ SUBDIRS = $(_CUSTOM_SUBDIRS_) \
+ 	asn1 \
++	ca \
+ 	docsis \
+ 	ethercat \
+ 	gryphon \
+diff -ru wireshark-1.10.2/plugins/Makefile.in wireshark-ca-1.10.2/plugins/Makefile.in
+--- wireshark-1.10.2/plugins/Makefile.in	2013-09-10 18:57:12.000000000 +0200
++++ wireshark-ca-1.10.2/plugins/Makefile.in	2013-10-23 20:11:17.808935667 +0200
+@@ -383,6 +383,7 @@
+ wiresharkfilter_man = @wiresharkfilter_man@
+ SUBDIRS = $(_CUSTOM_SUBDIRS_) \
+ 	asn1 \
++	ca \
+ 	docsis \
+ 	ethercat \
+ 	gryphon \
+diff -ru wireshark-1.10.2/plugins/Makefile.nmake wireshark-ca-1.10.2/plugins/Makefile.nmake
+--- wireshark-1.10.2/plugins/Makefile.nmake	2013-04-22 20:04:14.000000000 +0200
++++ wireshark-ca-1.10.2/plugins/Makefile.nmake	2013-10-23 20:11:17.808935667 +0200
+@@ -8,6 +8,7 @@
+ 
+ PLUGIN_LIST = \
+ 	asn1        \
++	ca          \
+ 	docsis      \
+ 	ethercat    \
+ 	gryphon     \

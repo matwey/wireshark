@@ -1,0 +1,89 @@
+=====
+Wireshark plugin for EPICS CA, V1.0.3.
+=====
+
+This directory contains the Wireshark plugin
+ for the Channel Access protocol (CA)
+ of Experimental Physics and Industrial Control System (EPICS).
+
+EPICS is a set of Open Source software tools, libraries and applications
+developed collaboratively and used worldwide to create distributed soft
+real-time control systems for scientific instruments such as particle
+accelerators, telescopes and other large scientific experiments.
+
+  <URL:http://www.aps.anl.gov/epics/>
+
+Channel access API and protocol provide network transparent access
+between EPICS components.
+
+  <URL:http://www.aps.anl.gov/epics/base/R3-14/12-docs/CAref.html>
+  <URL:http://epics.cosylab.com/cosyjava/JCA-Common/Documentation/CAproto.html>
+
+=====
+
+CA plugin dissects all CA header fields.  The channel names are also
+tracked along the virtual circuits.  Those fields and channel names 
+can be specified in the filter expression to search the packets of
+particular interest.
+
+While CA header fields would be fully dissected, CA payload is not
+dissected.  Other EPICS tools may be used to read the payload.
+
+=====
+
+Authors:
+  Ron Rechenmacher <ron@fnal.gov>, Fermilab, USA
+  Anze Zagar, Cosylab, Slovenia
+  Klemen Zagar <klemen.zagar@cosylab.com>, Cosylab, Slovenia
+  Kazuro Furukawa <kazuro.furukawa@kek.jp>, KEK, Japan
+
+Maintainer as of April 2011:
+  Kazuro Furukawa <kazuro.furukawa@kek.jp>, KEK, Japan
+
+Details on the Web page:
+  <URL:http://www-linac.kek.jp/cont/epics/wireshark/>
+
+=====
+
+How to get Wireshark-CA running:
+There are three ways;
+(1) Get binary executable.
+(2) Get CA plugin binary and put it into plugin directory.
+(3) Get CA plugin source code, put it under the wireshak build 
+    directory, then invoke make to build CA plugin. 
+(4) Get Wireshark source code, CA plugin source code and a patch 
+    for Makefile, then build full wireshark by yourself.
+
+In order to build full wireshark versions 1.10.2, 1.4.4, 1.0.0, 0.99.8 or 0.99.7
+with this CA plugin, one of these patch files
+wireshark-1.10.2-ca-1.0.3.patch
+wireshark-1.4.4-ca-1.0.2.patch
+wireshark-1.0.0-ca-1.0.1.patch
+wireshark-0.99.8-ca-1.0.1.patch
+wireshark-0.99.7-ca-1.0.1.patch
+has to be applied at the top directory of wireshark for 
+Makefile modifications.
+
+You can confirm whether your Wireshark includes CA plugin or not. 
+Open Wireshark, select "About wireshark" under "Help" menu, 
+choose "Plugins" tab, then you will see "ca 1.0.3".  
+Open Wireshark, select "Supported-Protocols" under "Internals" or "Help" menu,
+then you will see "EPICS Channel Access" as well. 
+Otherwise, you failed to install CA plugin.  Please check the following. 
+. If you have several versions of Wiresharks, select a correct version.
+. If you install CA plugin binary, check the correct directory. 
+  something like /usr/local/share/wireshark/plugins, and 
+  $HOME/.wireshark/plugins 
+. If you build it by yourself, check the build log. 
+
+See the web for the details.
+
+=====
+v1.0.0 (Feb.2008)
+  First version on wireshark-0.99.7.
+v1.0.1 (Mar.2008)
+  Modification on channel name/ID association for wireshark-0.99.8.
+v1.0.2 (Apr.2011)
+  Minor modification for wireshark-1.4.4.
+v1.0.3 (Oct.2013)
+  Minor modifications for wireshark-1.10.2.

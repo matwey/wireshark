@@ -1,0 +1,74 @@
+diff -urbN wireshark-1.4.4//Makefile.am wireshark-ca-1.4.4//Makefile.am
+--- wireshark-1.4.4//Makefile.am	2011-03-02 02:06:08.000000000 +0900
++++ wireshark-ca-1.4.4//Makefile.am	2011-04-16 11:14:53.000000000 +0900
+@@ -265,6 +265,7 @@
+ -include plugins/Custom.make
+ plugin_ldadd = $(_CUSTOM_plugin_ldadd_) \
+ 	-dlopen plugins/asn1/asn1.la \
++	-dlopen plugins/ca/ca.la \
+ 	-dlopen plugins/docsis/docsis.la \
+ 	-dlopen plugins/ethercat/ethercat.la \
+ 	-dlopen plugins/giop/cosnaming.la \
+diff -urbN wireshark-1.4.4//Makefile.in wireshark-ca-1.4.4//Makefile.in
+--- wireshark-1.4.4//Makefile.in	2011-03-02 02:07:55.000000000 +0900
++++ wireshark-ca-1.4.4//Makefile.in	2011-04-16 11:29:17.000000000 +0900
+@@ -132,6 +132,7 @@
+ am_dftest_OBJECTS = dftest-dftest.$(OBJEXT) dftest-util.$(OBJEXT)
+ dftest_OBJECTS = $(am_dftest_OBJECTS)
+ @HAVE_PLUGINS_TRUE@am__DEPENDENCIES_1 = plugins/asn1/asn1.la \
++@HAVE_PLUGINS_TRUE@	plugins/ca/ca.la \
+ @HAVE_PLUGINS_TRUE@	plugins/docsis/docsis.la \
+ @HAVE_PLUGINS_TRUE@	plugins/ethercat/ethercat.la \
+ @HAVE_PLUGINS_TRUE@	plugins/giop/cosnaming.la \
+@@ -799,6 +800,7 @@
+ @HAVE_PLUGINS_FALSE@plugin_ldadd = 
+ @HAVE_PLUGINS_TRUE@plugin_ldadd = $(_CUSTOM_plugin_ldadd_) \
+ @HAVE_PLUGINS_TRUE@	-dlopen plugins/asn1/asn1.la \
++@HAVE_PLUGINS_TRUE@	-dlopen plugins/ca/ca.la \
+ @HAVE_PLUGINS_TRUE@	-dlopen plugins/docsis/docsis.la \
+ @HAVE_PLUGINS_TRUE@	-dlopen plugins/ethercat/ethercat.la \
+ @HAVE_PLUGINS_TRUE@	-dlopen plugins/giop/cosnaming.la \
+diff -urbN wireshark-1.4.4//configure.in wireshark-ca-1.4.4//configure.in
+--- wireshark-1.4.4//configure.in	2011-03-02 02:06:07.000000000 +0900
++++ wireshark-ca-1.4.4//configure.in	2011-04-16 11:12:24.000000000 +0900
+@@ -1881,6 +1881,7 @@
+   packaging/svr4/pkginfo
+   plugins/Makefile
+   plugins/asn1/Makefile
++  plugins/ca/Makefile
+   plugins/docsis/Makefile
+   plugins/ethercat/Makefile
+   plugins/giop/Makefile
+diff -urbN wireshark-1.4.4//plugins/Makefile.am wireshark-ca-1.4.4//plugins/Makefile.am
+--- wireshark-1.4.4//plugins/Makefile.am	2011-03-02 02:04:05.000000000 +0900
++++ wireshark-ca-1.4.4//plugins/Makefile.am	2011-04-16 11:16:27.000000000 +0900
+@@ -24,6 +24,7 @@
+ -include Custom.make
+ SUBDIRS = $(_CUSTOM_SUBDIRS_) \
+ 	asn1 \
++	ca \
+ 	docsis \
+ 	ethercat \
+ 	giop \
+diff -urbN wireshark-1.4.4//plugins/Makefile.in wireshark-ca-1.4.4//plugins/Makefile.in
+--- wireshark-1.4.4//plugins/Makefile.in	2011-03-02 02:07:45.000000000 +0900
++++ wireshark-ca-1.4.4//plugins/Makefile.in	2011-04-16 11:18:15.000000000 +0900
+@@ -352,6 +352,7 @@
+ wiresharkfilter_man = @wiresharkfilter_man@
+ SUBDIRS = $(_CUSTOM_SUBDIRS_) \
+ 	asn1 \
++	ca \
+ 	docsis \
+ 	ethercat \
+ 	giop \
+diff -urbN wireshark-1.4.4//plugins/Makefile.nmake wireshark-ca-1.4.4//plugins/Makefile.nmake
+--- wireshark-1.4.4//plugins/Makefile.nmake	2011-03-02 02:04:05.000000000 +0900
++++ wireshark-ca-1.4.4//plugins/Makefile.nmake	2011-04-16 11:23:07.000000000 +0900
+@@ -8,6 +8,7 @@
+ 
+ PLUGIN_LIST = \
+ 	asn1        \
++	ca          \
+ 	docsis      \
+ 	ethercat    \
+ 	giop        \

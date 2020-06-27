@@ -1,0 +1,65 @@
+diff -urbN wireshark-1.0.0/Makefile.am wireshark-1.0.0-ca/Makefile.am
+--- wireshark-1.0.0/Makefile.am	2008-03-30 02:27:02.000000000 +0900
++++ wireshark-1.0.0-ca/Makefile.am	2008-04-06 10:45:24.000000000 +0900
+@@ -239,6 +239,7 @@
+ 	-dlopen plugins/agentx/agentx.la \
+ 	-dlopen plugins/artnet/artnet.la \
+ 	-dlopen plugins/asn1/asn1.la \
++	-dlopen plugins/ca/ca.la \
+ 	-dlopen plugins/ciscosm/ciscosm.la \
+ 	-dlopen plugins/docsis/docsis.la \
+ 	-dlopen plugins/enttec/enttec.la \
+diff -urbN wireshark-1.0.0/configure.in wireshark-1.0.0-ca/configure.in
+--- wireshark-1.0.0/configure.in	2008-03-30 02:27:02.000000000 +0900
++++ wireshark-1.0.0-ca/configure.in	2008-04-06 10:45:24.000000000 +0900
+@@ -1699,6 +1699,7 @@
+   plugins/agentx/Makefile
+   plugins/artnet/Makefile
+   plugins/asn1/Makefile
++  plugins/ca/Makefile
+   plugins/ciscosm/Makefile
+   plugins/docsis/Makefile
+   plugins/enttec/Makefile
+diff -urbN wireshark-1.0.0/plugins/Makefile.am wireshark-1.0.0-ca/plugins/Makefile.am
+--- wireshark-1.0.0/plugins/Makefile.am	2008-03-30 02:23:45.000000000 +0900
++++ wireshark-1.0.0-ca/plugins/Makefile.am	2008-04-06 10:45:24.000000000 +0900
+@@ -25,6 +25,7 @@
+ 	agentx \
+ 	artnet \
+ 	asn1 \
++	ca \
+ 	ciscosm \
+ 	docsis \
+ 	enttec \
+diff -urbN wireshark-1.0.0/plugins/Makefile.in wireshark-1.0.0-ca/plugins/Makefile.in
+--- wireshark-1.0.0/plugins/Makefile.in	2008-03-30 02:27:17.000000000 +0900
++++ wireshark-1.0.0-ca/plugins/Makefile.in	2008-04-06 10:45:24.000000000 +0900
+@@ -325,6 +325,7 @@
+ 	agentx \
+ 	artnet \
+ 	asn1 \
++	ca \
+ 	ciscosm \
+ 	docsis \
+ 	enttec \
+diff -urbN wireshark-1.0.0/plugins/Makefile.nmake wireshark-1.0.0-ca/plugins/Makefile.nmake
+--- wireshark-1.0.0/plugins/Makefile.nmake	2008-03-30 02:23:45.000000000 +0900
++++ wireshark-1.0.0-ca/plugins/Makefile.nmake	2008-04-06 10:45:24.000000000 +0900
+@@ -38,6 +38,9 @@
+ 	cd asn1
+ 	$(MAKE) /$(MAKEFLAGS) -f Makefile.nmake $(PLUGIN_TARGET)
+ 	cd ..
++	cd ca
++	$(MAKE) /$(MAKEFLAGS) -f Makefile.nmake $(PLUGIN_TARGET)
++	cd ..
+ 	cd ciscosm
+ 	$(MAKE) /$(MAKEFLAGS) -f Makefile.nmake $(PLUGIN_TARGET)
+ 	cd ..
+@@ -124,6 +127,7 @@
+ 	xcopy agentx\*.dll $(VERSION) /d
+ 	xcopy artnet\*.dll $(VERSION) /d
+ 	xcopy asn1\*.dll $(VERSION) /d
++	xcopy ca\*.dll $(VERSION) /d
+ 	xcopy ciscosm\*.dll $(VERSION) /d
+ 	xcopy docsis\*.dll $(VERSION) /d
+ 	xcopy enttec\*.dll $(VERSION) /d
