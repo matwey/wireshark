@@ -20,9 +20,11 @@
 #include <epan/expert.h>
 #include <epan/asn1.h>
 #include <epan/tfs.h>
+#include <epan/conversation.h>
 #include <wsutil/array.h>
 #include <wsutil/str_util.h>
 #include <wsutil/utf8_entities.h>
+#include <wsutil/wsgcrypt.h>
 #include "packet-kerberos.h"
 #include "packet-tls-utils.h"
 #include "packet-tn3270.h"
@@ -99,8 +101,24 @@ static int hf_telnet_vmware_vm_bios_uuid;
 static int hf_telnet_vmware_vm_location_uuid;
 static int hf_telnet_vmware_vm_name;
 
+static int hf_telnet_ilo2_cmd;
+static int hf_telnet_ilo2_key_index;
+static int hf_telnet_ilo2_encrypted_data;
+static int hf_telnet_ilo2_decrypted_data;
+static int hf_telnet_ilo2_mouse_dx;
+static int hf_telnet_ilo2_mouse_dy;
+static int hf_telnet_ilo2_mouse_client_x;
+static int hf_telnet_ilo2_mouse_client_y;
+static int hf_telnet_ilo2_button_mask;
+static int hf_telnet_ilo2_click_count;
+static int hf_telnet_ilo2_raw_byte;
+static int hf_telnet_ilo2_mouse_mode;
+static int hf_telnet_ilo2_decrypted_text;
+static int hf_telnet_ilo2_dvc_video;
+
 static int ett_telnet;
 static int ett_telnet_cmd;
+static int ett_ilo2_decrypted;
 static int ett_telnet_subopt;
 static int ett_status_subopt;
 static int ett_rcte_subopt;
@@ -139,6 +157,8 @@ static int ett_charset_subopt;
 static int ett_rsp_subopt;
 static int ett_comport_subopt;
 static int ett_starttls_subopt;
+static int ett_ilo2;
+static int ett_ilo2_cmd;
 
 static expert_field ei_telnet_suboption_length;
 static expert_field ei_telnet_invalid_subcommand;
@@ -185,6 +205,42 @@ static dissector_handle_t tls_handle;
 #define TN_EOF   236
 #define TN_ARE     1
 
+/* HP iLO2 proprietary commands */
+#define ILO2_CMD_ENCRYPT        0xC0
+#define ILO2_CMD_CHG_KEYS       0xC1
+#define ILO2_CMD_TS_AVAIL       0xC2
+#define ILO2_CMD_TS_NOT_AVAIL   0xC3
+#define ILO2_CMD_TS_STARTED     0xC4
+#define ILO2_CMD_TS_STOPPED     0xC5
+#define ILO2_CMD_MOUSE_MOVE     0xD0
+#define ILO2_CMD_BTN_PRESS      0xD1
+#define ILO2_CMD_BTN_RELEASE    0xD2
+#define ILO2_CMD_BTN_CLICK      0xD3
+#define ILO2_CMD_RAW_BYTE       0xD4
+#define ILO2_CMD_SET_MOUSE_MODE 0xD5
+
+static const value_string ilo2_cmd_vals[] = {
+  { ILO2_CMD_ENCRYPT,        "HP iLO2 Encrypt" },
+  { ILO2_CMD_CHG_KEYS,       "HP iLO2 Change Keys" },
+  { ILO2_CMD_TS_AVAIL,       "HP iLO2 Terminal Services Available" },
+  { ILO2_CMD_TS_NOT_AVAIL,   "HP iLO2 Terminal Services Not Available" },
+  { ILO2_CMD_TS_STARTED,     "HP iLO2 Terminal Services Started" },
+  { ILO2_CMD_TS_STOPPED,     "HP iLO2 Terminal Services Stopped" },
+  { ILO2_CMD_MOUSE_MOVE,     "HP iLO2 Mouse Move" },
+  { ILO2_CMD_BTN_PRESS,      "HP iLO2 Button Press" },
+  { ILO2_CMD_BTN_RELEASE,    "HP iLO2 Button Release" },
+  { ILO2_CMD_BTN_CLICK,      "HP iLO2 Button Click" },
+  { ILO2_CMD_RAW_BYTE,       "HP iLO2 Raw Byte" },
+  { ILO2_CMD_SET_MOUSE_MODE, "HP iLO2 Set Mouse Mode" },
+  { 0, NULL }
+};
+
+static const value_string ilo2_mouse_mode_vals[] = {
+  { 1, "Absolute" },
+  { 2, "Relative" },
+  { 0, NULL }
+};
+
 static const value_string cmd_vals[] = {
   { TN_EOF,    "End of File" },
   { TN_SUSP,   "Suspend Current Process" },
@@ -229,6 +285,165 @@ typedef struct _telnet_conv_info {
   uint32_t  starttls_port;          /* Source port for first sender */
   ssize_t   vmotion_sequence_len;   /* Length of "sequence" field for VMware vSPC vMotion. */
 } telnet_conv_info_t;
+
+/* HP iLO2 RC4 state */
+typedef struct _ilo2_rc4 {
+  uint8_t   s_box[256];
+  uint8_t   key_box[256];
+  uint8_t   key[16];
+  uint8_t   seed[16];
+  int       i;
+  int       j;
+  bool      initialized;
+} ilo2_rc4_t;
+
+/* HP iLO2 conversation info */
+typedef struct _ilo2_conv_info {
+  ilo2_rc4_t  server_rc4;   /* decryption: server -> client (uses INFOB) */
+  ilo2_rc4_t  client_rc4;   /* decryption: client -> server (uses INFOC) */
+  address     client_addr;  /* IP address of the iLO2 client */
+  bool        client_addr_set;
+  bool        encrypt_enabled;
+  bool        dvc_mode;
+  bool        dvc_encryption;
+  bool        server_encryption_active;  /* server->client data is now encrypted */
+  bool        client_encryption_active;  /* client->server data is now encrypted */
+  bool        dvc_active;                /* DVC video mode has been entered */
+} ilo2_conv_info_t;
+
+/* HP iLO2 session keys - from user-provided session parameters */
+static const uint8_t ilo2_decrypt_key[16] = {  /* INFOB: server->client decryption */
+  0x1C, 0x46, 0x54, 0xA7, 0x54, 0x2E, 0x6B, 0x8A,
+  0x87, 0x2C, 0xBF, 0x33, 0x04, 0x74, 0xD9, 0x9E
+};
+static const uint8_t ilo2_encrypt_key[16] = {  /* INFOC: client->server encryption */
+  0xBC, 0xF9, 0x5B, 0x76, 0x60, 0x1D, 0xD0, 0x2A,
+  0xF4, 0x2D, 0x7F, 0xB9, 0x9E, 0x0E, 0x60, 0xA0
+};
+
+static void
+ilo2_rc4_init(ilo2_rc4_t *rc4, const uint8_t *seed)
+{
+  int k;
+  gcry_md_hd_t md;
+  uint8_t digest[16];
+
+  memcpy(rc4->seed, seed, 16);
+  memset(rc4->key, 0, 16);
+
+  /* Compute initial key: MD5(seed || zeros) */
+  gcry_md_open(&md, GCRY_MD_MD5, 0);
+  gcry_md_write(md, rc4->seed, 16);
+  gcry_md_write(md, rc4->key, 16);
+  memcpy(digest, gcry_md_read(md, GCRY_MD_MD5), 16);
+  gcry_md_close(md);
+  memcpy(rc4->key, digest, 16);
+
+  /* Initialize S-box */
+  for (k = 0; k < 256; k++) {
+    rc4->s_box[k] = (uint8_t)k;
+    rc4->key_box[k] = rc4->key[k % 16];
+  }
+
+  /* KSA */
+  rc4->j = 0;
+  for (rc4->i = 0; rc4->i < 256; rc4->i++) {
+    rc4->j = ((rc4->j & 0xFF) + (rc4->s_box[rc4->i] & 0xFF) + (rc4->key_box[rc4->i] & 0xFF)) & 0xFF;
+    uint8_t tmp = rc4->s_box[rc4->i];
+    rc4->s_box[rc4->i] = rc4->s_box[rc4->j];
+    rc4->s_box[rc4->j] = tmp;
+  }
+
+  rc4->i = 0;
+  rc4->j = 0;
+  rc4->initialized = true;
+}
+
+static void
+ilo2_rc4_update_key(ilo2_rc4_t *rc4)
+{
+  int k;
+  gcry_md_hd_t md;
+  uint8_t digest[16];
+
+  gcry_md_open(&md, GCRY_MD_MD5, 0);
+  gcry_md_write(md, rc4->seed, 16);
+  gcry_md_write(md, rc4->key, 16);
+  memcpy(digest, gcry_md_read(md, GCRY_MD_MD5), 16);
+  gcry_md_close(md);
+  memcpy(rc4->key, digest, 16);
+
+  for (k = 0; k < 256; k++) {
+    rc4->s_box[k] = (uint8_t)k;
+    rc4->key_box[k] = rc4->key[k % 16];
+  }
+
+  rc4->j = 0;
+  for (rc4->i = 0; rc4->i < 256; rc4->i++) {
+    rc4->j = ((rc4->j & 0xFF) + (rc4->s_box[rc4->i] & 0xFF) + (rc4->key_box[rc4->i] & 0xFF)) & 0xFF;
+    uint8_t tmp = rc4->s_box[rc4->i];
+    rc4->s_box[rc4->i] = rc4->s_box[rc4->j];
+    rc4->s_box[rc4->j] = tmp;
+  }
+
+  rc4->i = 0;
+  rc4->j = 0;
+}
+
+static uint8_t
+ilo2_rc4_random(ilo2_rc4_t *rc4)
+{
+  rc4->i = ((rc4->i & 0xFF) + 1) & 0xFF;
+  rc4->j = ((rc4->j & 0xFF) + (rc4->s_box[rc4->i] & 0xFF)) & 0xFF;
+  uint8_t k = rc4->s_box[rc4->i];
+  rc4->s_box[rc4->i] = rc4->s_box[rc4->j];
+  rc4->s_box[rc4->j] = k;
+  uint8_t m = (uint8_t)((rc4->s_box[rc4->i] & 0xFF) + (rc4->s_box[rc4->j] & 0xFF)) & 0xFF;
+  return rc4->s_box[m];
+}
+
+static void
+ilo2_rc4_decrypt(ilo2_rc4_t *rc4, uint8_t *data, int len)
+{
+  int i;
+  for (i = 0; i < len; i++) {
+    data[i] ^= ilo2_rc4_random(rc4);
+  }
+}
+
+static ilo2_conv_info_t *
+ilo2_get_session(packet_info *pinfo)
+{
+  conversation_t     *conversation = find_or_create_conversation(pinfo);
+  ilo2_conv_info_t   *ilo2_info;
+
+  ilo2_info = (ilo2_conv_info_t *)conversation_get_proto_data(conversation, proto_telnet);
+  if (!ilo2_info) {
+    ilo2_info = wmem_new0(wmem_file_scope(), ilo2_conv_info_t);
+    ilo2_info->encrypt_enabled = false;
+    ilo2_info->dvc_mode = false;
+    ilo2_info->dvc_encryption = false;
+    ilo2_info->server_encryption_active = false;
+    ilo2_info->client_encryption_active = false;
+
+    /* Initialize RC4 with user-provided session keys */
+    ilo2_rc4_init(&ilo2_info->server_rc4, ilo2_decrypt_key);
+    ilo2_rc4_init(&ilo2_info->client_rc4, ilo2_encrypt_key);
+
+    conversation_add_proto_data(conversation, proto_telnet, ilo2_info);
+  }
+  return ilo2_info;
+}
+
+static bool
+ilo2_is_from_client(packet_info *pinfo, ilo2_conv_info_t *ilo2)
+{
+  if (!ilo2->client_addr_set) {
+    /* First ENCRYPT command with data sets the client address */
+    return true;
+  }
+  return addresses_equal(&pinfo->src, &ilo2->client_addr);
+}
 
 static void
 check_tn3270_model(packet_info *pinfo _U_, const char *terminaltype)
@@ -2110,7 +2325,7 @@ telnet_command(packet_info *pinfo, proto_tree *telnet_tree, tvbuff_t *tvb, int s
 {
   int    offset = start_offset;
   unsigned char optcode;
-  const char* optname;
+  const char* optname = NULL;
   proto_item *cmd_item, *subopt_item = NULL;
   proto_tree *cmd_tree, *subopt_tree = NULL;
 
@@ -2142,8 +2357,178 @@ telnet_command(packet_info *pinfo, proto_tree *telnet_tree, tvbuff_t *tvb, int s
     telnet_suboption_name(cmd_tree, pinfo, tvb, &offset, &optname, &subopt_tree, &subopt_item, "Suboption");
     break;
 
+  case ILO2_CMD_ENCRYPT: {
+    /* HP iLO2 Encrypt: IAC + 0xC0 + 4-byte key index + encrypted data */
+    ilo2_conv_info_t *ilo2 = ilo2_get_session(pinfo);
+    ilo2->encrypt_enabled = true;
+    ilo2->dvc_encryption = true;
+
+    /* Mark encryption as active for server→client direction.
+     * ESC [ R is sent as plaintext by the server before DVC mode,
+     * but the server encrypts data after IAC C0. We handle ESC [ R
+     * detection in the raw data before decryption. */
+    if (ilo2_is_from_client(pinfo, ilo2)) {
+      ilo2->client_encryption_active = true;
+    } else {
+      ilo2->server_encryption_active = true;
+    }
+    uint32_t key_index = 0;
+    if (tvb_offset_exists(tvb, offset + 3)) {
+      key_index  = (uint32_t)tvb_get_uint8(tvb, offset)     << 24;
+      key_index |= (uint32_t)tvb_get_uint8(tvb, offset + 1) << 16;
+      key_index |= (uint32_t)tvb_get_uint8(tvb, offset + 2) << 8;
+      key_index |= (uint32_t)tvb_get_uint8(tvb, offset + 3);
+      proto_tree_add_item(cmd_tree, hf_telnet_ilo2_key_index, tvb, offset, 4, ENC_BIG_ENDIAN);
+    }
+    offset += 4;
+
+    /* Consume all remaining bytes as encrypted data */
+    {
+      unsigned enc_len = tvb_reported_length_remaining(tvb, offset);
+      if (enc_len > 0) {
+        uint8_t *decrypted = (uint8_t *)wmem_alloc(pinfo->pool, enc_len);
+        tvbuff_t *decrypted_tvb;
+        bool from_client;
+
+        tvb_memcpy(tvb, decrypted, offset, enc_len);
+
+        /* Determine direction and use appropriate RC4 */
+        from_client = ilo2_is_from_client(pinfo, ilo2);
+        if (!ilo2->client_addr_set) {
+          /* First ENCRYPT with data - record client address */
+          copy_address(&ilo2->client_addr, &pinfo->src);
+          ilo2->client_addr_set = true;
+        }
+
+        if (from_client) {
+          ilo2_rc4_decrypt(&ilo2->client_rc4, decrypted, enc_len);
+        } else {
+          ilo2_rc4_decrypt(&ilo2->server_rc4, decrypted, enc_len);
+        }
+
+        proto_tree_add_bytes_format(cmd_tree, hf_telnet_ilo2_encrypted_data,
+                                   tvb, offset, enc_len, NULL, "Encrypted data (%u bytes)", enc_len);
+        decrypted_tvb = tvb_new_real_data(decrypted, enc_len, enc_len);
+        tvb_set_child_real_data_tvbuff(tvb, decrypted_tvb);
+        proto_tree_add_item(cmd_tree, hf_telnet_ilo2_decrypted_data,
+                           decrypted_tvb, 0, enc_len, ENC_NA);
+        offset += enc_len;
+      }
+    }
+
+    optname = wmem_strdup_printf(pinfo->pool, "HP iLO2 Encrypt (key=0x%08X)", key_index);
+    break;
+  }
+
+  case ILO2_CMD_CHG_KEYS:
+    optname = "HP iLO2 Change Keys";
+    ilo2_rc4_update_key(&ilo2_get_session(pinfo)->client_rc4);
+    ilo2_rc4_update_key(&ilo2_get_session(pinfo)->server_rc4);
+    break;
+
+  case ILO2_CMD_TS_AVAIL:
+    optname = "HP iLO2 Terminal Services Available";
+    break;
+
+  case ILO2_CMD_TS_NOT_AVAIL:
+    optname = "HP iLO2 Terminal Services Not Available";
+    break;
+
+  case ILO2_CMD_TS_STARTED:
+    optname = "HP iLO2 Terminal Services Started";
+    break;
+
+  case ILO2_CMD_TS_STOPPED:
+    optname = "HP iLO2 Terminal Services Stopped";
+    break;
+
+  case ILO2_CMD_MOUSE_MOVE: {
+    /* Mouse Move: 2 bytes (dx, dy) + optional 4 bytes (clientX, clientY) */
+    int8_t dx = 0, dy = 0;
+    if (tvb_offset_exists(tvb, offset + 1)) {
+      dx = (int8_t)tvb_get_uint8(tvb, offset);
+      dy = (int8_t)tvb_get_uint8(tvb, offset + 1);
+      proto_tree_add_item(cmd_tree, hf_telnet_ilo2_mouse_dx, tvb, offset, 1, ENC_NA);
+      proto_tree_add_item(cmd_tree, hf_telnet_ilo2_mouse_dy, tvb, offset + 1, 1, ENC_NA);
+      offset += 2;
+      /* Check for absolute coordinates (4 more bytes) */
+      if (tvb_offset_exists(tvb, offset + 3)) {
+        uint16_t client_x = (uint16_t)tvb_get_uint8(tvb, offset) << 8 | tvb_get_uint8(tvb, offset + 1);
+        uint16_t client_y = (uint16_t)tvb_get_uint8(tvb, offset + 2) << 8 | tvb_get_uint8(tvb, offset + 3);
+        proto_tree_add_item(cmd_tree, hf_telnet_ilo2_mouse_client_x, tvb, offset, 2, ENC_BIG_ENDIAN);
+        proto_tree_add_item(cmd_tree, hf_telnet_ilo2_mouse_client_y, tvb, offset + 2, 2, ENC_BIG_ENDIAN);
+        offset += 4;
+        optname = wmem_strdup_printf(pinfo->pool, "HP iLO2 Mouse Move dx=%d dy=%d (%u,%u)", dx, dy, client_x, client_y);
+      } else {
+        optname = wmem_strdup_printf(pinfo->pool, "HP iLO2 Mouse Move dx=%d dy=%d", dx, dy);
+      }
+    }
+    break;
+  }
+
+  case ILO2_CMD_BTN_PRESS: {
+    uint8_t mask = 0;
+    if (tvb_offset_exists(tvb, offset)) {
+      mask = tvb_get_uint8(tvb, offset);
+      proto_tree_add_item(cmd_tree, hf_telnet_ilo2_button_mask, tvb, offset, 1, ENC_NA);
+      offset++;
+    }
+    optname = wmem_strdup_printf(pinfo->pool, "HP iLO2 Button Press (0x%02X)", mask);
+    break;
+  }
+
+  case ILO2_CMD_BTN_RELEASE: {
+    uint8_t mask = 0;
+    if (tvb_offset_exists(tvb, offset)) {
+      mask = tvb_get_uint8(tvb, offset);
+      proto_tree_add_item(cmd_tree, hf_telnet_ilo2_button_mask, tvb, offset, 1, ENC_NA);
+      offset++;
+    }
+    optname = wmem_strdup_printf(pinfo->pool, "HP iLO2 Button Release (0x%02X)", mask);
+    break;
+  }
+
+  case ILO2_CMD_BTN_CLICK: {
+    uint8_t mask = 0, count = 0;
+    if (tvb_offset_exists(tvb, offset + 1)) {
+      mask = tvb_get_uint8(tvb, offset);
+      count = tvb_get_uint8(tvb, offset + 1);
+      proto_tree_add_item(cmd_tree, hf_telnet_ilo2_button_mask, tvb, offset, 1, ENC_NA);
+      proto_tree_add_item(cmd_tree, hf_telnet_ilo2_click_count, tvb, offset + 1, 1, ENC_NA);
+      offset += 2;
+    }
+    optname = wmem_strdup_printf(pinfo->pool, "HP iLO2 Button Click (0x%02X, %u)", mask, count);
+    break;
+  }
+
+  case ILO2_CMD_RAW_BYTE: {
+    uint8_t raw = 0;
+    if (tvb_offset_exists(tvb, offset)) {
+      raw = tvb_get_uint8(tvb, offset);
+      proto_tree_add_item(cmd_tree, hf_telnet_ilo2_raw_byte, tvb, offset, 1, ENC_NA);
+      offset++;
+    }
+    optname = wmem_strdup_printf(pinfo->pool, "HP iLO2 Raw Byte (0x%02X)", raw);
+    break;
+  }
+
+  case ILO2_CMD_SET_MOUSE_MODE: {
+    uint8_t mode = 0;
+    if (tvb_offset_exists(tvb, offset)) {
+      mode = tvb_get_uint8(tvb, offset);
+      proto_tree_add_item(cmd_tree, hf_telnet_ilo2_mouse_mode, tvb, offset, 1, ENC_NA);
+      offset++;
+    }
+    optname = wmem_strdup_printf(pinfo->pool, "HP iLO2 Set Mouse Mode (%s)", val_to_str_const(mode, ilo2_mouse_mode_vals, "Unknown"));
+    break;
+  }
+
   default:
-    optname = val_to_str_const(optcode, cmd_vals, "<unknown option>");
+    if (optcode >= 0xC0 && optcode <= 0xDF) {
+      optname = val_to_str_const(optcode, ilo2_cmd_vals, "HP iLO2 Unknown Command");
+    } else {
+      optname = val_to_str_const(optcode, cmd_vals, "<unknown option>");
+    }
     break;
   }
 
@@ -2236,6 +2621,266 @@ find_unescaped_iac(tvbuff_t *tvb, unsigned offset, unsigned len)
   return iac_offset;
 }
 
+/* Dissect client→server decrypted iLO2 payload: scan for IAC+command bytes */
+static void
+dissect_ilo2_c2s_decrypted(proto_tree *parent_tree, tvbuff_t *tvb, unsigned offset, unsigned len)
+{
+  proto_tree *tree;
+  proto_item *item;
+  unsigned    pos = 0;
+
+  item = proto_tree_add_item(parent_tree, hf_telnet_ilo2_decrypted_data, tvb, offset, len, ENC_NA);
+  tree = proto_item_add_subtree(item, ett_ilo2_decrypted);
+
+  while (pos < len) {
+    if (tvb_get_uint8(tvb, offset + pos) == TN_IAC && (pos + 1) < len) {
+      uint8_t cmd = tvb_get_uint8(tvb, offset + pos + 1);
+      if (cmd >= ILO2_CMD_MOUSE_MOVE && cmd <= ILO2_CMD_SET_MOUSE_MODE) {
+        unsigned cmd_start = pos;
+        unsigned cmd_len;
+        proto_item *cmd_item;
+        proto_tree *cmd_tree;
+
+        switch (cmd) {
+        case ILO2_CMD_MOUSE_MOVE:
+          cmd_len = 4;
+          /* Check for absolute mouse: 0xFF D0 0x40 0xC0 + 4 bytes client coords */
+          if ((pos + 9) < len) {
+            uint8_t b2 = tvb_get_uint8(tvb, offset + pos + 2);
+            uint8_t b3 = tvb_get_uint8(tvb, offset + pos + 3);
+            if (b2 == 0x40 && b3 == 0xC0) {
+              cmd_len = 10;
+            }
+          }
+          break;
+        case ILO2_CMD_BTN_PRESS:
+        case ILO2_CMD_BTN_RELEASE:
+          cmd_len = 3;
+          break;
+        case ILO2_CMD_BTN_CLICK:
+          cmd_len = 4;
+          break;
+        case ILO2_CMD_RAW_BYTE:
+          cmd_len = 3;
+          break;
+        case ILO2_CMD_SET_MOUSE_MODE:
+          cmd_len = 3;
+          break;
+        default:
+          cmd_len = 2;
+          break;
+        }
+
+        /* Don't go past the buffer */
+        if (cmd_start + cmd_len > len)
+          cmd_len = len - cmd_start;
+
+        cmd_tree = proto_tree_add_subtree_format(tree, tvb, offset + cmd_start, cmd_len,
+                                          ett_ilo2_cmd, &cmd_item,
+                                          "%s", val_to_str_const(cmd, ilo2_cmd_vals, "Unknown"));
+        proto_tree_add_item(cmd_tree, hf_telnet_ilo2_cmd, tvb, offset + cmd_start, 1, ENC_NA);
+
+        if (cmd == ILO2_CMD_MOUSE_MOVE && cmd_len >= 4) {
+          int8_t dx = (int8_t)tvb_get_uint8(tvb, offset + cmd_start + 2);
+          int8_t dy = (int8_t)tvb_get_uint8(tvb, offset + cmd_start + 3);
+          proto_tree_add_item(cmd_tree, hf_telnet_ilo2_mouse_dx, tvb, offset + cmd_start + 2, 1, ENC_NA);
+          proto_tree_add_item(cmd_tree, hf_telnet_ilo2_mouse_dy, tvb, offset + cmd_start + 3, 1, ENC_NA);
+          if (cmd_len >= 10) {
+            uint16_t cx = tvb_get_ntohs(tvb, offset + cmd_start + 4);
+            uint16_t cy = tvb_get_ntohs(tvb, offset + cmd_start + 6);
+            proto_tree_add_item(cmd_tree, hf_telnet_ilo2_mouse_client_x, tvb, offset + cmd_start + 4, 2, ENC_BIG_ENDIAN);
+            proto_tree_add_item(cmd_tree, hf_telnet_ilo2_mouse_client_y, tvb, offset + cmd_start + 6, 2, ENC_BIG_ENDIAN);
+            proto_item_append_text(cmd_item, "  abs(%u, %u)", cx, cy);
+          } else {
+            proto_item_append_text(cmd_item, "  rel(%d, %d)", dx, dy);
+          }
+        } else if ((cmd == ILO2_CMD_BTN_PRESS || cmd == ILO2_CMD_BTN_RELEASE || cmd == ILO2_CMD_BTN_CLICK) && cmd_len >= 3) {
+          uint8_t mask = tvb_get_uint8(tvb, offset + cmd_start + 2);
+          proto_tree_add_item(cmd_tree, hf_telnet_ilo2_button_mask, tvb, offset + cmd_start + 2, 1, ENC_NA);
+          proto_item_append_text(cmd_item, "  0x%02X%s%s%s", mask,
+                                 (mask & 0x04) ? " Left" : "",
+                                 (mask & 0x02) ? " Center" : "",
+                                 (mask & 0x01) ? " Right" : "");
+          if (cmd == ILO2_CMD_BTN_CLICK && cmd_len >= 4) {
+            proto_tree_add_item(cmd_tree, hf_telnet_ilo2_click_count, tvb, offset + cmd_start + 3, 1, ENC_NA);
+          }
+        } else if (cmd == ILO2_CMD_RAW_BYTE && cmd_len >= 3) {
+          proto_tree_add_item(cmd_tree, hf_telnet_ilo2_raw_byte, tvb, offset + cmd_start + 2, 1, ENC_NA);
+        } else if (cmd == ILO2_CMD_SET_MOUSE_MODE && cmd_len >= 3) {
+          uint8_t mode = tvb_get_uint8(tvb, offset + cmd_start + 2);
+          proto_tree_add_item(cmd_tree, hf_telnet_ilo2_mouse_mode, tvb, offset + cmd_start + 2, 1, ENC_NA);
+          proto_item_append_text(cmd_item, " (%s)", val_to_str_const(mode, ilo2_mouse_mode_vals, "Unknown"));
+        }
+
+        pos += cmd_len;
+        continue;
+      }
+    }
+    pos++;
+  }
+}
+
+/* Dissect server→client decrypted iLO2 payload */
+static void
+dissect_ilo2_s2c_decrypted(proto_tree *parent_tree, tvbuff_t *tvb, unsigned offset, unsigned len,
+                           ilo2_conv_info_t *ilo2, packet_info *pinfo)
+{
+  proto_tree *tree;
+  proto_item *item;
+  unsigned    i;
+  unsigned    printable_count = 0;
+  unsigned    escbracket_count = 0;
+  bool        has_esc_r = false;
+
+  /* Check for ESC [ R / ESC [ r in the data to detect DVC mode entry */
+  for (i = 0; i + 2 < len; i++) {
+    uint8_t b0 = tvb_get_uint8(tvb, offset + i);
+    uint8_t b1 = tvb_get_uint8(tvb, offset + i + 1);
+    uint8_t b2 = tvb_get_uint8(tvb, offset + i + 2);
+    if (b0 == 0x1B && b1 == '[' && (b2 == 'R' || b2 == 'r')) {
+      has_esc_r = true;
+      ilo2->dvc_active = true;
+      break;
+    }
+  }
+
+  /* Count printable characters */
+  for (i = 0; i < len; i++) {
+    uint8_t c = tvb_get_uint8(tvb, offset + i);
+    if (c >= 0x20 && c < 0x7F) {
+      printable_count++;
+    }
+    if (c == 0x1B || c == '[') {
+      escbracket_count++;
+    }
+  }
+
+  /* If DVC was already active or this looks like DVC video data */
+  if (ilo2->dvc_active || has_esc_r) {
+    item = proto_tree_add_item(parent_tree, hf_telnet_ilo2_decrypted_data, tvb, offset, len, ENC_NA);
+    tree = proto_item_add_subtree(item, ett_ilo2_decrypted);
+
+    /* Find ESC [ R/r position */
+    unsigned dvc_start = 0;
+    if (has_esc_r) {
+      for (i = 0; i + 2 < len; i++) {
+        uint8_t b0 = tvb_get_uint8(tvb, offset + i);
+        uint8_t b1 = tvb_get_uint8(tvb, offset + i + 1);
+        uint8_t b2 = tvb_get_uint8(tvb, offset + i + 2);
+        if (b0 == 0x1B && b1 == '[' && (b2 == 'R' || b2 == 'r')) {
+          dvc_start = i + 3;
+          break;
+        }
+      }
+    }
+
+    /* Show any pre-DVC text */
+    if (dvc_start > 0) {
+      proto_tree_add_bytes_format(tree, hf_telnet_ilo2_decrypted_data,
+                                 tvb, offset, dvc_start, NULL,
+                                 "Pre-DVC text (%u bytes)", dvc_start);
+      uint8_t mode_char = tvb_get_uint8(tvb, offset + dvc_start - 1);
+      proto_tree_add_bytes_format(tree, hf_telnet_ilo2_decrypted_data,
+                                 tvb, offset + dvc_start - 1, 3, NULL,
+                                 "DVC Mode Entry: ESC[%c",
+                                 mode_char == 'R' ? 'R' : 'r');
+    }
+
+    /* Show DVC bitstream data */
+    if (dvc_start < len) {
+      ilo2->dvc_active = true;
+      proto_tree_add_bytes_format(tree, hf_telnet_ilo2_dvc_video,
+                                  tvb, offset + dvc_start, len - dvc_start, NULL,
+                                  "DVC Video Bitstream (%u bytes)", len - dvc_start);
+    }
+  } else if ((len > 100 && printable_count < len / 4) ||
+             (len >= 10 && printable_count < len / 2 && escbracket_count == 0)) {
+    /* Large binary data with few printable chars - likely DVC bitstream */
+    ilo2->dvc_active = true;
+    item = proto_tree_add_item(parent_tree, hf_telnet_ilo2_decrypted_data, tvb, offset, len, ENC_NA);
+    tree = proto_item_add_subtree(item, ett_ilo2_decrypted);
+    proto_tree_add_bytes_format(tree, hf_telnet_ilo2_dvc_video,
+                                tvb, offset, len, NULL,
+                                "DVC Video Bitstream (%u bytes)", len);
+  } else if (printable_count > 0 && (printable_count * 3 > len)) {
+    /* Mostly printable text */
+    char *text = (char *)wmem_alloc(pinfo->pool, len + 1);
+    tvb_memcpy(tvb, (uint8_t *)text, offset, len);
+    text[len] = '\0';
+    item = proto_tree_add_item(parent_tree, hf_telnet_ilo2_decrypted_text, tvb, offset, len, ENC_NA);
+    tree = proto_item_add_subtree(item, ett_ilo2_decrypted);
+    proto_tree_add_string(tree, hf_telnet_ilo2_decrypted_text, tvb, offset, len, text);
+  } else {
+    /* Binary data */
+    item = proto_tree_add_item(parent_tree, hf_telnet_ilo2_decrypted_data, tvb, offset, len, ENC_NA);
+  }
+}
+
+/* Scan raw server→client data for ESC [ R (DVC mode entry) BEFORE decryption.
+ * If found: show pre-ESC [ R as plaintext, show ESC [ R as mode entry,
+ * decrypt post-ESC [ R with RC4, and set server_encryption_active.
+ * Returns true if ESC [ R was found and data was handled. */
+static bool
+handle_s2c_esc_r_raw(tvbuff_t *tvb, proto_tree *tree, int offset, unsigned len,
+                     ilo2_conv_info_t *ilo2, packet_info *pinfo)
+{
+  uint8_t *raw;
+  unsigned esc_r_pos = (unsigned)-1;
+  unsigned i;
+
+  if (ilo2_is_from_client(pinfo, ilo2) || ilo2->server_encryption_active)
+    return false;
+
+  raw = (uint8_t *)wmem_alloc(pinfo->pool, len);
+  tvb_memcpy(tvb, raw, offset, len);
+
+  for (i = 0; i + 2 < len; i++) {
+    if (raw[i] == 0x1B && raw[i + 1] == '[' && (raw[i + 2] == 'R' || raw[i + 2] == 'r')) {
+      esc_r_pos = i;
+      break;
+    }
+  }
+
+  if (esc_r_pos == (unsigned)-1)
+    return false;
+
+  {
+    unsigned pre_len = esc_r_pos;
+    unsigned post_start = esc_r_pos + 3;
+    unsigned post_len = len - post_start;
+
+    /* Show any pre-ESC [ R plaintext text */
+    if (pre_len > 0) {
+      char *text = (char *)wmem_alloc(pinfo->pool, pre_len + 1);
+      memcpy(text, raw, pre_len);
+      text[pre_len] = '\0';
+      proto_tree_add_string(tree, hf_telnet_ilo2_decrypted_text, tvb, offset, pre_len, text);
+    }
+
+    /* Show ESC [ R as DVC mode entry */
+    proto_tree_add_bytes_format(tree, hf_telnet_ilo2_decrypted_data,
+                               tvb, offset + esc_r_pos, 3, NULL,
+                               "DVC Mode Entry: ESC[%c", raw[esc_r_pos + 2]);
+
+    /* Decrypt and dissect post-ESC [ R data */
+    if (post_len > 0) {
+      uint8_t *decrypted = (uint8_t *)wmem_alloc(pinfo->pool, post_len);
+      tvbuff_t *decrypted_tvb;
+      memcpy(decrypted, raw + post_start, post_len);
+      ilo2_rc4_decrypt(&ilo2->server_rc4, decrypted, post_len);
+      decrypted_tvb = tvb_new_real_data(decrypted, post_len, post_len);
+      tvb_set_child_real_data_tvbuff(tvb, decrypted_tvb);
+      proto_tree_add_bytes_format(tree, hf_telnet_ilo2_encrypted_data,
+                                 tvb, offset + post_start, post_len, NULL,
+                                 "Encrypted data (%u bytes)", post_len);
+      dissect_ilo2_s2c_decrypted(tree, decrypted_tvb, 0, post_len, ilo2, pinfo);
+    }
+
+    ilo2->server_encryption_active = true;
+  }
+  return true;
+}
+
 static int
 dissect_telnet(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void* data _U_)
 {
@@ -2262,6 +2907,109 @@ dissect_telnet(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void* data _
    * Scan through the buffer looking for an IAC byte.
    */
   while ((len = tvb_reported_length_remaining(tvb, offset)) > 0) {
+    ilo2_conv_info_t *ilo2 = ilo2_get_session(pinfo);
+    bool from_client = ilo2_is_from_client(pinfo, ilo2);
+
+    /* If encryption is active for this direction, all bytes are encrypted -
+     * no IAC bytes exist in the stream. Skip scanning and decrypt all.
+     * Exception: server→client may contain plaintext ESC [ R which signals
+     * DVC mode entry — detect it in the raw data before decrypting. */
+    if ((from_client && ilo2->client_encryption_active) ||
+        (!from_client && ilo2->server_encryption_active)) {
+      /* For server→client: check if raw data contains ESC [ R (plaintext) */
+      if (!from_client) {
+        bool found_esc_r = false;
+        unsigned esc_r_pos = 0;
+        {
+          uint8_t *raw_check = (uint8_t *)wmem_alloc(pinfo->pool, len);
+          unsigned k;
+          tvb_memcpy(tvb, raw_check, offset, len);
+          for (k = 0; k + 2 < len; k++) {
+            if (raw_check[k] == 0x1B && raw_check[k+1] == '[' &&
+                (raw_check[k+2] == 'R' || raw_check[k+2] == 'r')) {
+              found_esc_r = true;
+              esc_r_pos = k;
+              break;
+            }
+          }
+        }
+
+        if (found_esc_r) {
+          /* Split: decrypt pre-ESC [ R, show ESC [ R as plaintext, decrypt post */
+          unsigned pre_len = esc_r_pos;
+          unsigned post_start = esc_r_pos + 3;
+          unsigned post_len = len - post_start;
+
+          add_telnet_data_bytes_str(pinfo, &num_info_items, len);
+
+          /* Decrypt and show pre-ESC [ R data */
+          if (pre_len > 0) {
+            uint8_t *decrypted = (uint8_t *)wmem_alloc(pinfo->pool, pre_len);
+            tvbuff_t *decrypted_tvb;
+            tvb_memcpy(tvb, decrypted, offset, pre_len);
+            ilo2_rc4_decrypt(&ilo2->server_rc4, decrypted, pre_len);
+            decrypted_tvb = tvb_new_real_data(decrypted, pre_len, pre_len);
+            tvb_set_child_real_data_tvbuff(tvb, decrypted_tvb);
+            proto_tree_add_bytes_format(telnet_tree, hf_telnet_ilo2_encrypted_data,
+                                       tvb, offset, pre_len, NULL, "Encrypted data (%u bytes)", pre_len);
+            dissect_ilo2_s2c_decrypted(telnet_tree, decrypted_tvb, 0, pre_len, ilo2, pinfo);
+          }
+
+          /* Show ESC [ R as plaintext DVC mode entry */
+          {
+            uint8_t esc_byte = tvb_get_uint8(tvb, offset + esc_r_pos + 2);
+            proto_tree_add_bytes_format(telnet_tree, hf_telnet_ilo2_decrypted_data,
+                                       tvb, offset + esc_r_pos, 3, NULL,
+                                       "DVC Mode Entry: ESC[%c (plaintext)",
+                                       esc_byte == 'R' ? 'R' : 'r');
+          }
+
+          /* Decrypt and show post-ESC [ R data */
+          if (post_len > 0) {
+            uint8_t *decrypted = (uint8_t *)wmem_alloc(pinfo->pool, post_len);
+            tvbuff_t *decrypted_tvb;
+            tvb_memcpy(tvb, decrypted, offset + post_start, post_len);
+            ilo2_rc4_decrypt(&ilo2->server_rc4, decrypted, post_len);
+            decrypted_tvb = tvb_new_real_data(decrypted, post_len, post_len);
+            tvb_set_child_real_data_tvbuff(tvb, decrypted_tvb);
+            proto_tree_add_bytes_format(telnet_tree, hf_telnet_ilo2_encrypted_data,
+                                       tvb, offset + post_start, post_len, NULL,
+                                       "Encrypted data (%u bytes)", post_len);
+            dissect_ilo2_s2c_decrypted(telnet_tree, decrypted_tvb, 0, post_len, ilo2, pinfo);
+          }
+
+          ilo2->dvc_active = true;
+          offset += len;
+          break;
+        }
+      }
+
+      /* Normal path: decrypt all bytes */
+      add_telnet_data_bytes_str(pinfo, &num_info_items, len);
+      {
+        uint8_t *decrypted = (uint8_t *)wmem_alloc(pinfo->pool, len);
+        tvbuff_t *decrypted_tvb;
+        tvb_memcpy(tvb, decrypted, offset, len);
+        if (from_client) {
+          ilo2_rc4_decrypt(&ilo2->client_rc4, decrypted, len);
+        } else {
+          ilo2_rc4_decrypt(&ilo2->server_rc4, decrypted, len);
+        }
+        decrypted_tvb = tvb_new_real_data(decrypted, len, len);
+        tvb_set_child_real_data_tvbuff(tvb, decrypted_tvb);
+        proto_tree_add_bytes_format(telnet_tree, hf_telnet_ilo2_encrypted_data,
+                                   tvb, offset, len, NULL, "Encrypted data (%u bytes)", len);
+        /* Dissect the decrypted payload */
+        if (from_client) {
+          dissect_ilo2_c2s_decrypted(telnet_tree, decrypted_tvb, 0, len);
+        } else {
+          dissect_ilo2_s2c_decrypted(telnet_tree, decrypted_tvb, 0, len, ilo2, pinfo);
+        }
+      }
+      offset += len;
+      break;
+    }
+
     iac_offset = find_unescaped_iac(tvb, offset, len);
     if (iac_offset != -1) {
       /*
@@ -2278,8 +3026,37 @@ dissect_telnet(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void* data _
         } else if (is_tn5250) {
           next_tvb = tvb_new_subset_length(tvb, offset, data_len);
           call_dissector(tn5250_handle, next_tvb, pinfo, telnet_tree);
-        } else
+        } else if (ilo2->encrypt_enabled && data_len > 0) {
+          /* Server→client: scan for ESC [ R in raw plaintext before decrypting */
+          if (handle_s2c_esc_r_raw(tvb, telnet_tree, offset, data_len, ilo2, pinfo)) {
+            /* ESC [ R found, data handled and encryption activated */
+          } else if (ilo2_is_from_client(pinfo, ilo2) || ilo2->server_encryption_active) {
+            /* Client→server or encryption already active — decrypt all */
+            uint8_t *decrypted = (uint8_t *)wmem_alloc(pinfo->pool, data_len);
+            tvbuff_t *decrypted_tvb;
+            tvb_memcpy(tvb, decrypted, offset, data_len);
+            if (ilo2_is_from_client(pinfo, ilo2)) {
+              ilo2_rc4_decrypt(&ilo2->client_rc4, decrypted, data_len);
+            } else {
+              ilo2_rc4_decrypt(&ilo2->server_rc4, decrypted, data_len);
+            }
+            decrypted_tvb = tvb_new_real_data(decrypted, data_len, data_len);
+            tvb_set_child_real_data_tvbuff(tvb, decrypted_tvb);
+            proto_tree_add_bytes_format(telnet_tree, hf_telnet_ilo2_encrypted_data,
+                                       tvb, offset, data_len, NULL, "Encrypted data (%u bytes)", data_len);
+            /* Dissect the decrypted payload */
+            if (ilo2_is_from_client(pinfo, ilo2)) {
+              dissect_ilo2_c2s_decrypted(telnet_tree, decrypted_tvb, 0, data_len);
+            } else {
+              dissect_ilo2_s2c_decrypted(telnet_tree, decrypted_tvb, 0, data_len, ilo2, pinfo);
+            }
+          } else {
+            /* Server→client, no ESC [ R yet — plain text (e.g., "Login Name: ") */
+            telnet_add_text(telnet_tree, tvb, offset, data_len);
+          }
+        } else {
           telnet_add_text(telnet_tree, tvb, offset, data_len);
+        }
       }
       /*
        * Now interpret the command.
@@ -2299,7 +3076,36 @@ dissect_telnet(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void* data _
        */
       if (len > 0) {
         add_telnet_data_bytes_str(pinfo, &num_info_items, len);
-        telnet_add_text(telnet_tree, tvb, offset, len);
+        if (ilo2->encrypt_enabled && len > 0) {
+          /* Server→client: scan for ESC [ R in raw plaintext before decrypting */
+          if (handle_s2c_esc_r_raw(tvb, telnet_tree, offset, len, ilo2, pinfo)) {
+            /* ESC [ R found, data handled and encryption activated */
+          } else if (ilo2_is_from_client(pinfo, ilo2) || ilo2->server_encryption_active) {
+            /* Client→server or encryption already active — decrypt all */
+            uint8_t *decrypted = (uint8_t *)wmem_alloc(pinfo->pool, len);
+            tvbuff_t *decrypted_tvb;
+            tvb_memcpy(tvb, decrypted, offset, len);
+            if (ilo2_is_from_client(pinfo, ilo2)) {
+              ilo2_rc4_decrypt(&ilo2->client_rc4, decrypted, len);
+            } else {
+              ilo2_rc4_decrypt(&ilo2->server_rc4, decrypted, len);
+            }
+            decrypted_tvb = tvb_new_real_data(decrypted, len, len);
+            tvb_set_child_real_data_tvbuff(tvb, decrypted_tvb);
+            proto_tree_add_bytes_format(telnet_tree, hf_telnet_ilo2_encrypted_data,
+                                       tvb, offset, len, NULL, "Encrypted data (%u bytes)", len);
+            if (ilo2_is_from_client(pinfo, ilo2)) {
+              dissect_ilo2_c2s_decrypted(telnet_tree, decrypted_tvb, 0, len);
+            } else {
+              dissect_ilo2_s2c_decrypted(telnet_tree, decrypted_tvb, 0, len, ilo2, pinfo);
+            }
+          } else {
+            /* Server→client, no ESC [ R yet — plain text (e.g., "Login Name: ") */
+            telnet_add_text(telnet_tree, tvb, offset, len);
+          }
+        } else {
+          telnet_add_text(telnet_tree, tvb, offset, len);
+        }
       }
       break;
     }
@@ -2547,6 +3353,62 @@ proto_register_telnet(void)
       { "VM name", "telnet.vmware.vm.name", FT_STRING, BASE_NONE,
         NULL, 0, NULL, HFILL }
     },
+    { &hf_telnet_ilo2_cmd,
+      { "iLO2 Command", "telnet.ilo2.cmd", FT_UINT8, BASE_HEX,
+        VALS(ilo2_cmd_vals), 0, "HP iLO2 Command", HFILL }
+    },
+    { &hf_telnet_ilo2_key_index,
+      { "Key Index", "telnet.ilo2.key_index", FT_UINT32, BASE_HEX,
+        NULL, 0, "HP iLO2 Encryption Key Index", HFILL }
+    },
+    { &hf_telnet_ilo2_encrypted_data,
+      { "Encrypted Data", "telnet.ilo2.encrypted_data", FT_BYTES, BASE_NONE,
+        NULL, 0, "HP iLO2 Encrypted Data", HFILL }
+    },
+    { &hf_telnet_ilo2_decrypted_data,
+      { "Decrypted Data", "telnet.ilo2.decrypted_data", FT_BYTES, BASE_NONE,
+        NULL, 0, "HP iLO2 Decrypted Data", HFILL }
+    },
+    { &hf_telnet_ilo2_mouse_dx,
+      { "Mouse DX", "telnet.ilo2.mouse_dx", FT_INT8, BASE_DEC,
+        NULL, 0, "HP iLO2 Mouse Delta X", HFILL }
+    },
+    { &hf_telnet_ilo2_mouse_dy,
+      { "Mouse DY", "telnet.ilo2.mouse_dy", FT_INT8, BASE_DEC,
+        NULL, 0, "HP iLO2 Mouse Delta Y", HFILL }
+    },
+    { &hf_telnet_ilo2_mouse_client_x,
+      { "Client X", "telnet.ilo2.mouse_client_x", FT_UINT16, BASE_DEC,
+        NULL, 0, "HP iLO2 Mouse Absolute Client X", HFILL }
+    },
+    { &hf_telnet_ilo2_mouse_client_y,
+      { "Client Y", "telnet.ilo2.mouse_client_y", FT_UINT16, BASE_DEC,
+        NULL, 0, "HP iLO2 Mouse Absolute Client Y", HFILL }
+    },
+    { &hf_telnet_ilo2_button_mask,
+      { "Button Mask", "telnet.ilo2.button_mask", FT_UINT8, BASE_HEX,
+        NULL, 0, "HP iLO2 Mouse Button Mask", HFILL }
+    },
+    { &hf_telnet_ilo2_click_count,
+      { "Click Count", "telnet.ilo2.click_count", FT_UINT8, BASE_DEC,
+        NULL, 0, "HP iLO2 Mouse Click Count", HFILL }
+    },
+    { &hf_telnet_ilo2_raw_byte,
+      { "Raw Byte", "telnet.ilo2.raw_byte", FT_UINT8, BASE_HEX,
+        NULL, 0, "HP iLO2 Raw Mouse Byte", HFILL }
+    },
+    { &hf_telnet_ilo2_mouse_mode,
+      { "Mouse Mode", "telnet.ilo2.mouse_mode", FT_UINT8, BASE_DEC,
+        VALS(ilo2_mouse_mode_vals), 0, "HP iLO2 Mouse Mode", HFILL }
+    },
+    { &hf_telnet_ilo2_decrypted_text,
+      { "Decrypted Text", "telnet.ilo2.decrypted_text", FT_STRING, BASE_NONE,
+        NULL, 0, "HP iLO2 Decrypted Text Data", HFILL }
+    },
+    { &hf_telnet_ilo2_dvc_video,
+      { "DVC Video", "telnet.ilo2.dvc_video", FT_BYTES, BASE_NONE,
+        NULL, 0, "HP iLO2 DVC Video Bitstream", HFILL }
+    },
   };
   static int *ett[] = {
     &ett_telnet,
@@ -2589,6 +3451,9 @@ proto_register_telnet(void)
     &ett_rsp_subopt,
     &ett_comport_subopt,
     &ett_starttls_subopt,
+    &ett_ilo2,
+    &ett_ilo2_cmd,
+    &ett_ilo2_decrypted,
   };
 
   static ei_register_info ei[] = {
