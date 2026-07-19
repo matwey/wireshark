@@ -17,6 +17,7 @@
 #include <stdlib.h>
 
 #include <epan/packet.h>
+#include <epan/prefs.h>
 #include <epan/expert.h>
 #include <epan/asn1.h>
 #include <epan/tfs.h>
@@ -311,15 +312,37 @@ typedef struct _ilo2_conv_info {
   bool        dvc_active;                /* DVC video mode has been entered */
 } ilo2_conv_info_t;
 
-/* HP iLO2 session keys - from user-provided session parameters */
-static const uint8_t ilo2_decrypt_key[16] = {  /* INFOB: server->client decryption */
-  0x1C, 0x46, 0x54, 0xA7, 0x54, 0x2E, 0x6B, 0x8A,
-  0x87, 0x2C, 0xBF, 0x33, 0x04, 0x74, 0xD9, 0x9E
-};
-static const uint8_t ilo2_encrypt_key[16] = {  /* INFOC: client->server encryption */
-  0xBC, 0xF9, 0x5B, 0x76, 0x60, 0x1D, 0xD0, 0x2A,
-  0xF4, 0x2D, 0x7F, 0xB9, 0x9E, 0x0E, 0x60, 0xA0
-};
+/* HP iLO2 session keys - configurable via preferences */
+static const char *ilo2_infob_str = "";
+static const char *ilo2_infoc_str = "";
+static uint8_t ilo2_infob[16];
+static uint8_t ilo2_infoc[16];
+static bool ilo2_keys_valid = false;
+
+/* Parse a 32-character hex string into a 16-byte buffer.
+ * Returns true on success. */
+static bool
+ilo2_parse_hex_key(const char *hex, uint8_t *out)
+{
+  unsigned i;
+  if (!hex || strlen(hex) != 32)
+    return false;
+  for (i = 0; i < 16; i++) {
+    unsigned byte;
+    if (sscanf(hex + i * 2, "%2x", &byte) != 1)
+      return false;
+    out[i] = (uint8_t)byte;
+  }
+  return true;
+}
+
+/* Parse preference hex strings into byte arrays. Called when preferences change. */
+static void
+ilo2_update_keys(void)
+{
+  ilo2_keys_valid = ilo2_parse_hex_key(ilo2_infob_str, ilo2_infob) &&
+                    ilo2_parse_hex_key(ilo2_infoc_str, ilo2_infoc);
+}
 
 static void
 ilo2_rc4_init(ilo2_rc4_t *rc4, const uint8_t *seed)
@@ -427,8 +450,10 @@ ilo2_get_session(packet_info *pinfo)
     ilo2_info->client_encryption_active = false;
 
     /* Initialize RC4 with user-provided session keys */
-    ilo2_rc4_init(&ilo2_info->server_rc4, ilo2_decrypt_key);
-    ilo2_rc4_init(&ilo2_info->client_rc4, ilo2_encrypt_key);
+    if (ilo2_keys_valid) {
+      ilo2_rc4_init(&ilo2_info->server_rc4, ilo2_infob);
+      ilo2_rc4_init(&ilo2_info->client_rc4, ilo2_infoc);
+    }
 
     conversation_add_proto_data(conversation, proto_telnet, ilo2_info);
   }
@@ -3472,6 +3497,7 @@ proto_register_telnet(void)
   };
 
   expert_module_t* expert_telnet;
+  module_t *ilo2_module;
 
   proto_telnet = proto_register_protocol("Telnet", "TELNET", "telnet");
   proto_register_field_array(proto_telnet, hf, array_length(hf));
@@ -3479,6 +3505,20 @@ proto_register_telnet(void)
 
   expert_telnet = expert_register_protocol(proto_telnet);
   expert_register_field_array(expert_telnet, ei, array_length(ei));
+
+  /* Register iLO2 decryption preferences */
+  ilo2_module = prefs_register_protocol(proto_telnet, ilo2_update_keys);
+  prefs_register_string_preference(ilo2_module, "ilo2_infob",
+      "iLO2 INFOB key (server→client)",
+      "32-character hex string for server→client RC4 decryption key (INFOB)",
+      &ilo2_infob_str);
+  prefs_register_string_preference(ilo2_module, "ilo2_infoc",
+      "iLO2 INFOC key (client→server)",
+      "32-character hex string for client→server RC4 encryption key (INFOC)",
+      &ilo2_infoc_str);
+
+  /* Parse default key values */
+  ilo2_update_keys();
 
   telnet_handle = register_dissector("telnet", dissect_telnet, proto_telnet);
 }
